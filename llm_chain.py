@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-LLM_MODEL       = os.getenv("GOOGLE_MODEL")
+LLM_MODEL       = "gemini-2.0-flash"
 TEMPERATURE     = 0.1   # low temperature — factual, grounded outputs
 MAX_TOKENS      = 1024
 
@@ -62,8 +62,12 @@ def get_llm() -> ChatGoogleGenerativeAI:
     """
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        raise EnvironmentError("GOOGLE_API_KEY not found")
-    log.info(f"Initializing LLM (model={LLM_MODEL}, temp={TEMPERATURE})")
+        raise EnvironmentError(
+            "GOOGLE_API_KEY not found. Add it to your .env file:\n"
+            "  GOOGLE_API_KEY=your_key_here\n"
+            "Get a free key: https://aistudio.google.com/app/apikey"
+        )
+    log.info(f"Initialising LLM  (model={LLM_MODEL}, temp={TEMPERATURE})")
     return ChatGoogleGenerativeAI(
         model=LLM_MODEL,
         google_api_key=api_key,
@@ -76,7 +80,7 @@ def get_llm() -> ChatGoogleGenerativeAI:
 # TRACK 1 — TECHNICIAN FAULT BRIEF
 # ─────────────────────────────────────────────────────────────────────────────
 
-TRACK1_SYSTEM_PROMPT = """You are an expert automotive diagnostic assistant for Mitsubishi authorized workshops.
+TRACK1_SYSTEM_PROMPT = """You are an expert automotive diagnostic assistant for Mitsubishi authorised workshops.
 
 Your role is to generate a structured Technician Fault Brief based on:
 1. The ML anomaly detection result (fault class and label)
@@ -113,11 +117,11 @@ Detection     : 30-day telemetry anomaly (ML classification)
 
 SENSOR FINDINGS
 ---------------
-[List each sensor that is outside normal SOP thresholds. Format: Sensor: actual value (SOP normal range: X-Y)]
+[List each sensor that is outside normal SOP thresholds. Format: Sensor: actual value (SOP normal range: X–Y)]
 
 PROBABLE CAUSE
 --------------
-[Top 1-3 probable causes from the SOP, ranked by likelihood]
+[Top 1–3 probable causes from the SOP, ranked by likelihood]
 
 INSPECTION CHECKLIST
 --------------------
@@ -212,7 +216,7 @@ def build_chains(vectorstore: Chroma) -> Dict[str, Any]:
     llm = get_llm()
     log.info("Building Track 1 chain (Technician Fault Brief) ...")
     t1_chain = build_track1_chain(llm)
-    log.info("Building Track 2 chain (Owner Risk Alert - Bahasa Indonesia) ...")
+    log.info("Building Track 2 chain (Owner Risk Alert — Bahasa Indonesia) ...")
     t2_chain = build_track2_chain(llm)
     log.info("Both chains ready.")
     return {
@@ -260,7 +264,7 @@ def run_track1(
 
     Args:
         chains:          Output of build_chains()
-        fault_class:     ML model output (0-7)
+        fault_class:     ML model output (0–7)
         sensor_readings: Dict of sensor name → value from 30-day telemetry
 
     Returns:
@@ -275,14 +279,16 @@ def run_track1(
         f"  {k}: {v}" for k, v in sensor_readings.items()
     )
 
-    # RAG retrieval — query uses fault label + key sensors
+    # RAG retrieval — timed separately for monitoring
     rag_query = (
         f"{fault_label} inspection procedure sensor thresholds "
         f"fault class {fault_class}"
     )
-    retriever = get_retriever(chains["vectorstore"], k=4)
-    retrieved = retriever.invoke(rag_query)
-    context   = format_context(retrieved)
+    retriever  = get_retriever(chains["vectorstore"], k=4)
+    t_rag      = time.time()
+    retrieved  = retriever.invoke(rag_query)
+    rag_ms     = int((time.time() - t_rag) * 1000)
+    context    = format_context(retrieved)
 
     log.info(f"Track 1 — running chain for Class {fault_class}: {fault_label}")
     t0 = time.time()
@@ -296,7 +302,16 @@ def run_track1(
     })
 
     elapsed_ms = int((time.time() - t0) * 1000)
-    log.info(f"Track 1 — response generated  ({elapsed_ms}ms)")
+
+    # Estimate token usage from character counts
+    # Gemini tokenises ~4 chars per token on average
+    context_chars  = len(context)
+    prompt_chars   = len(sensor_str) + len(fault_label) + context_chars
+    response_chars = len(brief)
+    input_tokens   = int(prompt_chars  / 4)
+    output_tokens  = int(response_chars / 4)
+
+    log.info(f"Track 1 — response generated  ({elapsed_ms}ms, ~{input_tokens}in/{output_tokens}out tokens)")
 
     return {
         "track":            1,
@@ -306,6 +321,9 @@ def run_track1(
         "brief":            brief,
         "context_chunks":   len(retrieved),
         "response_time_ms": elapsed_ms,
+        "rag_retrieval_ms": rag_ms,
+        "input_tokens":     input_tokens,
+        "output_tokens":    output_tokens,
     }
 
 
@@ -342,20 +360,25 @@ def run_track2(
             "alert":            None,
             "context_chunks":   0,
             "response_time_ms": 0,
+            "rag_retrieval_ms": 0,
+            "input_tokens":     0,
+            "output_tokens":    0,
         }
 
     sensor_str = "\n".join(
         f"  {k}: {v}" for k, v in sensor_readings.items()
     )
 
-    # RAG retrieval — query uses risk level + alert template
+    # RAG retrieval — timed separately for monitoring
     rag_query = (
         f"risk class {risk_class} {risk_label} owner alert template "
         f"bahasa indonesia notification action"
     )
-    retriever = get_retriever(chains["vectorstore"], k=4)
-    retrieved = retriever.invoke(rag_query)
-    context   = format_context(retrieved)
+    retriever  = get_retriever(chains["vectorstore"], k=4)
+    t_rag      = time.time()
+    retrieved  = retriever.invoke(rag_query)
+    rag_ms     = int((time.time() - t_rag) * 1000)
+    context    = format_context(retrieved)
 
     log.info(f"Track 2 — running chain for Risk Class {risk_class}: {risk_label}")
     t0 = time.time()
@@ -368,7 +391,15 @@ def run_track2(
     })
 
     elapsed_ms = int((time.time() - t0) * 1000)
-    log.info(f"Track 2 — alert generated  ({elapsed_ms}ms)")
+
+    # Estimate token usage (~4 chars per token)
+    context_chars  = len(context)
+    prompt_chars   = len(sensor_str) + len(risk_label) + context_chars
+    response_chars = len(alert) if alert else 0
+    input_tokens   = int(prompt_chars  / 4)
+    output_tokens  = int(response_chars / 4)
+
+    log.info(f"Track 2 — alert generated  ({elapsed_ms}ms, ~{input_tokens}in/{output_tokens}out tokens)")
 
     return {
         "track":            2,
@@ -377,6 +408,9 @@ def run_track2(
         "alert":            alert,
         "context_chunks":   len(retrieved),
         "response_time_ms": elapsed_ms,
+        "rag_retrieval_ms": rag_ms,
+        "input_tokens":     input_tokens,
+        "output_tokens":    output_tokens,
     }
 
 

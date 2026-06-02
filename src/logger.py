@@ -53,11 +53,24 @@ LOGS_DIR  = Path("logs")
 LOG_FILE  = LOGS_DIR / "app.jsonl"
 
 # Google Gemini pricing (as of May 2026 — update if rates change)
-# gemini-2.0-flash: $0.10 per 1M input tokens, $0.40 per 1M output tokens
+PRICING = {
+    "gemini-2.0-flash": {
+        "input_per_1m":  0.10,
+        "output_per_1m": 0.40,
+    },
+    "gemini-3.1-flash-lite": {
+        "input_per_1m":  0.075,
+        "output_per_1m": 0.30,
+    },
+    "default": {
+        "input_per_1m":  0.10,
+        "output_per_1m": 0.40,
+    },
+}
+
+# Keep these for backward compatibility
 COST_INPUT_PER_TOKEN  = 0.10  / 1_000_000
 COST_OUTPUT_PER_TOKEN = 0.40  / 1_000_000
-
-# text-embedding-004: $0.025 per 1M tokens
 COST_EMBED_PER_TOKEN  = 0.025 / 1_000_000
 
 
@@ -73,6 +86,7 @@ def calculate_cost(
     input_tokens: int,
     output_tokens: int,
     embed_tokens: int = 0,
+    model: str = "gemini-2.0-flash",
 ) -> float:
     """
     Calculate the estimated USD cost of a single request.
@@ -81,12 +95,16 @@ def calculate_cost(
         input_tokens:  Tokens in the LLM prompt (context + question)
         output_tokens: Tokens in the LLM response
         embed_tokens:  Tokens embedded for RAG retrieval (optional)
+        model:         LLM model name for accurate pricing
 
     Returns:
         Estimated cost in USD
     """
-    llm_cost   = (input_tokens  * COST_INPUT_PER_TOKEN +
-                  output_tokens * COST_OUTPUT_PER_TOKEN)
+    pricing    = PRICING.get(model, PRICING["default"])
+    llm_cost   = (
+        (input_tokens  / 1_000_000) * pricing["input_per_1m"] +
+        (output_tokens / 1_000_000) * pricing["output_per_1m"]
+    )
     embed_cost = embed_tokens * COST_EMBED_PER_TOKEN
     return round(llm_cost + embed_cost, 8)
 
@@ -109,6 +127,8 @@ def log_request(
     input_tokens: int            = 0,
     output_tokens: int           = 0,
     embed_tokens: int            = 0,
+    model: str                   = "gemini-2.0-flash",
+    rag_retrieval_ms: int        = 0,
     safety_passed: bool          = True,
     output_valid: bool           = True,
     status: str                  = "ok",
@@ -123,7 +143,7 @@ def log_request(
     _ensure_log_dir()
 
     request_id = str(uuid.uuid4())
-    cost       = calculate_cost(input_tokens, output_tokens, embed_tokens)
+    cost       = calculate_cost(input_tokens, output_tokens, embed_tokens, model)
     correct    = (predicted_class == true_class) if true_class is not None else None
 
     entry: Dict[str, Any] = {
@@ -138,12 +158,16 @@ def log_request(
         "true_label":       true_label,
         "correct":          correct,
         "llm_called":       llm_called,
+        "model":            model,
         "response_time_ms": response_time_ms,
+        "rag_retrieval_ms": rag_retrieval_ms,
         "context_chunks":   context_chunks,
         "input_tokens":     input_tokens,
         "output_tokens":    output_tokens,
         "embed_tokens":     embed_tokens,
         "cost_usd":         cost,
+        "input_price_per_1m":  PRICING.get(model, PRICING["default"])["input_per_1m"],
+        "output_price_per_1m": PRICING.get(model, PRICING["default"])["output_per_1m"],
         "safety_passed":    safety_passed,
         "output_valid":     output_valid,
         "status":           status,
